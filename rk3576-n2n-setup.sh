@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION="1.0.3"
+VERSION="1.0.4"
 N2N_VERSION="3.1.1"
 N2N_COMMIT="ce998b986c633bc563835d8a3cc8f72a017b53d1"
 KERNEL_REQUIRED="6.1.99"
@@ -32,11 +32,13 @@ usage() {
 用法：
   sudo bash rk3576-n2n-setup.sh 082              首次安装或更新编号
   sudo rk3576-n2n-setup --set-id 083            仅修改编号，不重装
+  sudo rk3576-n2n-setup --set-key               重新输入共享密钥（两次确认），不重装
   sudo rk3576-n2n-setup --status                查看当前状态
   sudo bash rk3576-n2n-setup.sh 082 --key-file /root/n2n.key
 
 编号必须恰好是 3 位数字（例如 001、082、999），保留前导零。
 首次安装时，如果未发现原有密钥，将从本机终端隐藏输入一次。
+--set-key 只更新已由本脚本生成的配置；终端隐藏输入新密钥两次。
 若需完全无交互安装，请事先安全放置只有 root 可读的密钥文件，再加 --key-file 参数。
 EOF
 }
@@ -394,6 +396,73 @@ apply_config() {
   log 'Supernode 注册与端到端连通性需要额外验证，RUNNING 不等于联网成功'
   log "旧配置备份：$backup_dir"
 }
+# Read and strictly validate the identity so --set-key cannot silently alter IDs.
+read_current_id() {
+  [[ -f "$EDGE_CONF" ]] || fail 'n2n edge 配置不存在：请先完成首次安装'
+  grep -q '^# managed-by: rk3576-n2n-setup' "$EDGE_CONF" || \
+    fail 'edge.conf 不由本脚本管理，拒绝直接修改密钥；请先完成迁移'
+  local community identity id
+  community="$(sed -n 's/^-c=//p' "$EDGE_CONF")"
+  identity="$(sed -n 's/^-I=//p' "$EDGE_CONF")"
+  [[ "$community" =~ ^${ID_PREFIX}([0-9]{3})_([0-9]{3})$ ]] || \
+    fail '现有社区名称格式异常，拒绝修改；请先检查或使用 --set-id 修复'
+  id="${BASH_REMATCH[1]}"
+  [[ "$id" == "${BASH_REMATCH[2]}" && "$identity" == "${ID_PREFIX}${id}" ]] || \
+    fail '现有 -c 与 -I 不一致，拒绝修改；请先使用 --set-id 修复'
+  printf '%s' "$id"
+}
+# Secret must come from the terminal, never a shell argument or environment variable.
+read_new_key_twice() {
+  local first='' second=''
+  [[ -r /dev/tty && -w /dev/tty ]] || \
+    fail '未检测到可交互终端；--set-key 必须在工控机终端或交互 SSH 中运行'
+  printf '请输入新的 n2n 共享密钥（不回显）：' > /dev/tty
+  IFS= read -r -s first < /dev/tty || fail '新密钥读取失败，原配置未更改'
+  printf '\n请再次输入以确认（不回显）：' > /dev/tty
+  IFS= read -r -s second < /dev/tty || fail '确认密钥读取失败，原配置未更改'
+  printf '\n' > /dev/tty
+  [[ "$first" == "$second" ]] || fail '两次输入的密钥不一致，原配置未更改'
+  validate_key "$first"
+  printf '%s' "$first"
+  unset first second
+}
+# Edit only the -k= line. All other configuration bytes and values remain unchanged.
+# A protected backup permits rollback when Supervisor reports startup failure.
+apply_key_update() {
+  local new_secret="$1" current_id="$2" backup_dir tmp line='' count=0
+  install -d -m 700 /etc/n2n
+  backup_dir="$(mktemp -d /etc/n2n/.rk3576-key-backup.XXXXXXXX)"
+  chmod 700 "$backup_dir"
+  cp -p "$EDGE_CONF" "$backup_dir/edge.conf"
+  chmod 600 "$backup_dir/edge.conf"
+  tmp="$(mktemp /etc/n2n/.edge.conf.XXXXXXXX)"
+  chmod 600 "$tmp"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == -k=* ]]; then
+      ((count+=1))
+      printf '%s\n' "-k=${new_secret}"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$EDGE_CONF" > "$tmp"
+  if (( count != 1 )); then
+    rm -f "$tmp"
+    fail "现有配置的 -k= 条目数量异常：${count}；原配置未更改"
+  fi
+  mv -f "$tmp" "$EDGE_CONF"
+  if ! service_run; then
+    warn '新密钥写入后 edge 启动失败，恢复上一个密钥并尝试重启'
+    cp -p "$backup_dir/edge.conf" "$EDGE_CONF"
+    chmod 600 "$EDGE_CONF"
+    supervisorctl restart n2n-edge >/dev/null 2>&1 || \
+      warn '回滚后 edge 仍未成功重启，请检查 Supervisor 状态和日志'
+    fail "--set-key 未完成，已恢复原配置；备份目录：${backup_dir}"
+  fi
+  log "已更新设备 ${current_id} 的 n2n 共享密钥；-c、-I、-A5 与 Supernode 未改变"
+  log "旧密钥的本地备份（root-only）：${backup_dir}/edge.conf"
+  log '注意：edge 进程 RUNNING 不代表密钥正确或对端能通信，必须进一步验证组网'
+}
+
 show_status() {
   local community='not-configured' identity='not-configured' id='not-configured' parse_status='unknown'
   if [[ -f "$EDGE_CONF" ]]; then
@@ -440,17 +509,33 @@ main() {
     -h|--help|'') usage; [[ -n "${1:-}" ]] && exit 0 || exit 2 ;;
     --status) [[ $# -eq 1 ]] || fail '多余参数'; show_status; exit 0 ;;
     --set-id) mode='set-id'; [[ $# -eq 2 ]] || fail '用法：--set-id 083'; id="$2" ;;
+    --set-key) mode='set-key'; [[ $# -eq 1 ]] || fail '用法：--set-key（交互输入新密钥）' ;;
     *) id="$1"; shift
        if [[ $# -gt 0 ]]; then
           [[ $# -eq 2 && "$1" == '--key-file' ]] || fail '仅支持可选的 --key-file /root/path'
           key_file="$2"
        fi ;;
   esac
-  validate_id "$id"
+  if [[ "$mode" != 'set-key' ]]; then validate_id "$id"; fi
   require_root
   acquire_lock
   ensure_log
-  log "rk3576-n2n-setup $VERSION：操作=$mode；编号=$id"
+  log "rk3576-n2n-setup $VERSION：操作=$mode${id:+；编号=$id}"
+  if [[ "$mode" == 'set-key' ]]; then
+    local current_id old_secret new_secret
+    current_id="$(read_current_id)"
+    old_secret="$(extract_key_from_old_file "$EDGE_CONF")" || fail '旧配置找不到 -k= 共享密钥'
+    new_secret="$(read_new_key_twice)"
+    if [[ "$new_secret" == "$old_secret" ]]; then
+      log '新密钥与原密钥一致，未修改配置，也未重启 edge'
+    else
+      apply_key_update "$new_secret" "$current_id"
+    fi
+    unset old_secret new_secret
+    install_self
+    log '密钥设置操作完成；已更新本地维护脚本'
+    exit 0
+  fi
   if [[ "$mode" == 'set-id' ]]; then
     [[ -f "$EDGE_CONF" ]] || fail '尚未完成脚本部署，先运行：sudo bash 脚本.sh 082'
     grep -q '^# managed-by: rk3576-n2n-setup' "$EDGE_CONF" || fail '现有 edge.conf 不是本脚本生成的，避免误改；请先运行完整安装迁移'

@@ -55,6 +55,42 @@ sudo /usr/local/sbin/rk3576-n2n-setup --set-id 083
 
 也可以重复执行：`sudo /usr/local/sbin/rk3576-n2n-setup 083`，但这会顺带执行版本和 TUN 检查。
 
+## 共享密钥输错：`--set-key` 交互式修复（v1.0.4）
+
+在已完成安装的工控机上运行：
+
+```bash
+sudo /usr/local/sbin/rk3576-n2n-setup --set-key
+```
+
+会要求在终端 **隐藏输入新密钥两次**：
+
+```text
+请输入新的 n2n 共享密钥（不回显）：
+请再次输入以确认（不回显）：
+```
+
+- 两次输入不一致或不符合密钥格式要求：拒绝修改，保留原配置；不会重启 edge。
+- 两次相同并通过格式检查：只替换 `/etc/n2n/edge.conf` 的 `-k=` 行，原 `-c`、`-I`、`-A5`、Supernode 参数及其他内容保持不变；自动重启 Supervisor 中的 edge，不重新安装依赖、n2n 或 TUN。
+- 如果 Supervisor 报告 edge 启动失败：尝试恢复原配置并重启旧服务。
+- 每次成功尝试都会将原配置备份到仅 root 可访问的 `/etc/n2n/.rk3576-key-backup.*`，其内部 **包含旧密钥明文**；确认不再需要回滚后，应安全清理旧备份。
+- **重要：** `RUNNING` 只代表进程能启动，无法自动判断新共享密钥和对端是否一致；必须测试实际组网通信。如果密钥依然不对，可再次运行 `--set-key`。
+- 不要将密钥写进命令参数、公开脚本、GitHub 或调试日志；不要用 `bash -x` 执行安装脚本。
+
+**升级已有工控机本地管理脚本后，再运行 `--set-key`：** 当前设备访问 GitHub Raw 不稳定，请优先用已经克隆的仓库：
+
+```bash
+cd /tmp/rk3576-n2n-install
+git pull --ff-only origin main
+grep '^VERSION=' rk3576-n2n-setup.sh    # 应显示 1.0.4
+bash -n rk3576-n2n-setup.sh
+sudo bash ./rk3576-n2n-setup.sh --set-key
+```
+
+成功执行后会把 v1.0.4 脚本安装/更新到 `/usr/local/sbin/rk3576-n2n-setup`，以后可直接使用维护命令。
+
+如果此前安装过程因 APT 依赖故障而**尚未生成** `/etc/n2n/edge.conf`，不能直接用 `--set-key`，先按首次安装流程完成部署：`sudo bash ./rk3576-n2n-setup.sh 083`。
+
 ## 查看状态
 
 ```bash
@@ -139,3 +175,10 @@ apt-mark showhold
 ```
 
 不要在生产设备上盲目使用 `full-upgrade`、`--force-*` 等方式绕过此类依赖问题。
+
+## 2026-10-22 维护增强（v1.0.4）
+
+- 新增 `--set-key`（两次隐藏输入、原配置备份、只改 `-k=`、重启 edge）。
+- 新密钥与当前相同则跳过文件改动和进程重启。
+- 对存在冲突的 `-c` / `-I` 拒绝直接改密钥，避免静默改动编号。
+- 通过 Bash 语法和隔离测试：改密钥不影响其他字段、备份权限 0700/0600、服务启动失败回滚、双次输入匹配及不匹配处理。尚未完成实体 RK3576 上的 `--set-key` 实测。
