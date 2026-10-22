@@ -22,13 +22,13 @@ n2n 3.1.1 社区名称最多 19 个有效字符，`1712350000082_082` 为 17 个
 
 对应 n2n 参数为 `-f -k <本地密钥> -c 1712350000083_083 -I 1712350000083 -A5 -l 43.137.14.161:7799`。出于安全原因，Supervisor 的 `command` 指向 `/etc/n2n/edge.conf`，实际传给 n2n 的配置参数与该示例等效，密钥不会直接出现于 Supervisor 文件中。
 
-## 首次安装
+## 首次安装（推荐先下载检查，再执行）
 
-把 `rk3576-n2n-setup.sh` 上传到你控制的公开 HTTPS 地址（如 GitHub Public Repo），以 GitHub Raw 为例，将下面 `YOUR_ACCOUNT/YOUR_REPO` 替换为实际仓库名称：
+把 `rk3576-n2n-setup.sh` 上传到你控制的公开 HTTPS 地址（如 GitHub Public Repo），以 GitHub Raw 为例，将下面 `xiaoxintiao1tiao/n2n_install` 替换为实际仓库名称：
 
 ```bash
 f=$(mktemp) && curl -fL --retry 3 \
-  'https://raw.githubusercontent.com/YOUR_ACCOUNT/YOUR_REPO/main/rk3576-n2n-setup.sh' \
+  'https://raw.githubusercontent.com/xiaoxintiao1tiao/n2n_install/main/rk3576-n2n-setup.sh' \
   -o "$f" && sudo bash "$f" 082; r=$?; rm -f "$f"; (exit "$r")
 ```
 
@@ -85,7 +85,57 @@ sudo tail -n 40 /var/log/n2n-edge.log
 之前发布的脚本将 `-I` 错误固定为 `1712350000082`。**仅运行旧版 `--set-id 083` 无法修复该错误**。先从你的公网 HTTPS 地址重新下载更新后的脚本：
 
 ```bash
-f=$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/YOUR_ACCOUNT/YOUR_REPO/main/rk3576-n2n-setup.sh' -o "$f" && sudo bash "$f" --set-id 083; rc=$?; rm -f "$f"; (exit "$rc")
+f=$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/xiaoxintiao1tiao/n2n_install/main/rk3576-n2n-setup.sh' -o "$f" && sudo bash "$f" --set-id 083; rc=$?; rm -f "$f"; (exit "$rc")
 ```
 
 新版 `--set-id` 修改配置成功后，也会更新 `/usr/local/sbin/rk3576-n2n-setup`，以后可以直接本机执行 `--set-id`。
+
+
+## 2026-10-22 脚本校正（v1.0.3）
+
+- 修复 Supervisor 首次 `update` 自动启动程序后尚处于 `STARTING`，重复执行 `start` 的竞态。
+- 修复复用原有密钥时，日志混入命令替换输出的问题。
+- 避免 `zcat | grep -q` 在 `pipefail` 下可能提前关闭管道造成的误判。
+- `-c` 与 `-I` 都按三位编号生成，`083` 对应 `1712350000083_083` 和 `1712350000083`。
+- 通过 Bash 语法检查与模拟 Supervisor 首次安装和已安装更新两类测试；完整 RK3576 端到端仍需现场验证。
+
+**公网仓库：** https://github.com/xiaoxintiao1tiao/n2n_install
+
+**下载：**
+```bash
+curl -fL https://raw.githubusercontent.com/xiaoxintiao1tiao/n2n_install/main/rk3576-n2n-setup.sh -o rk3576-n2n-setup.sh
+```
+**验收：**
+```bash
+bash -n rk3576-n2n-setup.sh
+sudo bash rk3576-n2n-setup.sh 082
+sudo /usr/local/sbin/rk3576-n2n-setup --status
+```
+
+
+## 2026-10-22 RK3576 实机故障修复 (v1.0.3)
+
+- 修复依赖检测误判，优先根据实际已安装包或可用工具检查，不再无条件触发 `apt install`。如果工具已具备，会直接跳过 APT，从而避免无关的 `curl/libcurl4` 软件源版本冲突。
+- n2n 版本检查改为捕获 `edge -h` 输出后解析，避免 shell `pipefail` 与 `grep -q` 早退组合带来的误判。
+- 由于设备能够 `git clone github.com` 但无法访问 `raw.githubusercontent.com`，仓库现在应同时放置与脚本同级的 **`tun.c`**；安装时优先使用该文件，并以 Linux stable 6.1.99 Git blob SHA 校验内容，省去对 GitHub Raw 的依赖。
+
+### 更新 GitHub 仓库
+
+把 `rk3576-n2n-setup.sh`、`tun.c`（和本 README）上传到仓库主分支，然后在设备上：
+
+```bash
+cd /tmp/rk3576-n2n-install
+git pull --ff-only origin main
+bash -n rk3576-n2n-setup.sh
+sudo bash rk3576-n2n-setup.sh 083
+```
+
+### 若仍出现 curl/libcurl4 依赖冲突
+
+```bash
+dpkg-query -W -f='${binary:Package} ${db:Status-Status} ${Version}\n' curl libcurl4
+apt-cache policy curl libcurl4
+apt-mark showhold
+```
+
+不要在生产设备上盲目使用 `full-upgrade`、`--force-*` 等方式绕过此类依赖问题。

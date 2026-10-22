@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION="1.0.1"
+VERSION="1.0.3"
 N2N_VERSION="3.1.1"
 N2N_COMMIT="ce998b986c633bc563835d8a3cc8f72a017b53d1"
 KERNEL_REQUIRED="6.1.99"
@@ -14,6 +14,7 @@ N2N_SRC="/data/n2n-3.1.1"
 TUN_SRC="/data/tun-module"
 KDIR="/usr/src/linux-headers-6.1-rockchip"
 TUN_URL="https://raw.githubusercontent.com/gregkh/linux/cac15753b8ceb505a3c646f83a86dccbab9e33a3/drivers/net/tun.c"
+TUN_GIT_BLOB="4af1ba5d074c05abe37694fd22bf85b9c7654284"
 SUPER="43.137.14.161:7799"
 # 10-digit fixed root + exactly 3-digit site/device suffix.
 # ID=083 -> identity=1712350000083, community=1712350000083_083
@@ -72,26 +73,57 @@ require_platform() {
   [[ "$distro" == 'debian:12' ]] || fail "当前系统 $distro，脚本仅验证 Debian 12"
   log "平台通过：RK3576 / Debian 12 / Kernel ${release}"
 }
+package_installed_or_available() {
+  local pkg="$1" binary="${2:-}"
+  # Check the package's *actual* state, not the full dpkg "want/err/status"
+  # string, which may vary across vendor images / held packages.
+  if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)" == 'installed' ]]; then
+    return 0
+  fi
+  # Vendor images may ship working binaries outside dpkg's package database.
+  [[ -n "$binary" ]] && command -v "$binary" >/dev/null 2>&1
+}
 install_packages_if_missing() {
-  local packages=(git curl ca-certificates build-essential autoconf automake libtool pkg-config iproute2 kmod supervisor)
-  local missing=() p
-  for p in "${packages[@]}"; do
-    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qx 'install ok installed'; then
-      missing+=("$p")
-    fi
-  done
-  if ((${#missing[@]})); then
-    log "安装缺少的系统依赖：${missing[*]}"
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
-  else
-    log '所需系统软件包已安装'
+  local missing=()
+  package_installed_or_available git git || missing+=(git)
+  package_installed_or_available curl curl || missing+=(curl)
+  if ! package_installed_or_available ca-certificates && [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+    missing+=(ca-certificates)
+  fi
+  if ! package_installed_or_available build-essential &&
+     { ! command -v gcc >/dev/null 2>&1 ||
+       ! command -v g++ >/dev/null 2>&1 ||
+       ! command -v make >/dev/null 2>&1; }; then
+    missing+=(build-essential)
+  fi
+  package_installed_or_available autoconf autoreconf || missing+=(autoconf)
+  package_installed_or_available automake automake || missing+=(automake)
+  package_installed_or_available libtool libtoolize || missing+=(libtool)
+  package_installed_or_available pkg-config pkg-config || missing+=(pkg-config)
+  package_installed_or_available iproute2 ip || missing+=(iproute2)
+  package_installed_or_available kmod modprobe || missing+=(kmod)
+  package_installed_or_available supervisor supervisorctl || missing+=(supervisor)
+  if ((${#missing[@]} == 0)); then
+    log '所需依赖已具备，跳过 apt 更新与安装（避免触发无关的软件包升级）'
+    return 0
+  fi
+  log "仅安装缺少的依赖：${missing[*]}"
+  apt-get update
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"; then
+    warn 'APT 安装失败，可能存在软件源版本不一致或 hold；不会更改现有 curl/libcurl 版本'
+    apt-cache policy curl libcurl4 >&2 || true
+    apt-mark showhold >&2 || true
+    fail '请先检查 APT 依赖，再重新执行脚本；当前还没有进入 n2n/服务配置阶段'
   fi
 }
+
 n2n_is_311() {
-  [[ -x /usr/sbin/edge ]] &&
-    /usr/sbin/edge -h 2>&1 | grep -q 'n2n v\.3\.1\.1'
+  [[ -x /usr/sbin/edge ]] || return 1
+  local info
+  info="$(/usr/sbin/edge -h 2>&1 || true)"
+  [[ "$info" == *'n2n v.3.1.1'* ]]
 }
+
 install_n2n() {
   if n2n_is_311; then log 'n2n 3.1.1 已安装，跳过编译'; return 0; fi
   if [[ -e /usr/sbin/edge ]]; then
@@ -136,7 +168,7 @@ ensure_tun_device_node() {
 ensure_tun() {
   if tap_probe; then
     # A manually insmod'ed driver works now but may disappear on reboot.
-    if [[ -f /proc/config.gz ]] && zcat /proc/config.gz | grep -qx 'CONFIG_TUN=y'; then
+    if [[ -f /proc/config.gz ]] && zcat /proc/config.gz | grep -x 'CONFIG_TUN=y' >/dev/null; then
       log 'TUN/TAP 已内置内核，跳过模块构建'
       return 0
     fi
@@ -167,7 +199,7 @@ ensure_tun() {
     [[ -s "$KDIR/$f" ]] || fail "headers 缺少 $f"
   done
   if [[ -f /proc/config.gz ]]; then
-    zcat /proc/config.gz | grep -qx 'CONFIG_MODULES=y' || fail '内核不支持动态模块'
+    zcat /proc/config.gz | grep -x 'CONFIG_MODULES=y' >/dev/null || fail '内核不支持动态模块'
   else
     fail '缺少 /proc/config.gz，无法安全确认内核选项'
   fi
@@ -178,12 +210,19 @@ ensure_tun() {
   fi
   mkdir -p "$TUN_SRC"
   if [[ ! -s "$TUN_SRC/tun.c" ]]; then
-    log '下载 Linux stable v6.1.99 tun.c（固定上游提交）'
-    curl -fL --retry 3 --proto '=https' --tlsv1.2 \
-      "$TUN_URL" -o "$TUN_SRC/tun.c.tmp"
-    mv "$TUN_SRC/tun.c.tmp" "$TUN_SRC/tun.c"
+    local bundled_tun="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/tun.c"
+    if [[ -s "$bundled_tun" ]]; then
+      log '从安装脚本同目录读取已打包的 Linux 6.1.99 tun.c（避开 GitHub Raw）'
+      install -m 644 "$bundled_tun" "$TUN_SRC/tun.c"
+    else
+      log '安装包不含 tun.c，尝试从 GitHub Raw 下载内核源码'
+      curl -fL --retry 3 --connect-timeout 10 --max-time 90 --proto '=https' --tlsv1.2 \
+        "$TUN_URL" -o "$TUN_SRC/tun.c.tmp"
+      mv "$TUN_SRC/tun.c.tmp" "$TUN_SRC/tun.c"
+    fi
   fi
-  grep -q 'Universal TUN/TAP device driver' "$TUN_SRC/tun.c" || fail 'tun.c 文件异常'
+  [[ "$(git hash-object "$TUN_SRC/tun.c")" == "$TUN_GIT_BLOB" ]] || \
+    fail 'tun.c 与固定 Linux stable 6.1.99 上游源码不一致，拒绝编译'
   cat > "$TUN_SRC/Makefile" <<'EOF'
 obj-m += tun.o
 ccflags-y += -DCONFIG_TUN_MODULE
@@ -232,9 +271,9 @@ get_secret() {
     (( (8#$perms & 077) == 0 )) || fail '密钥文件必须禁止组/其他用户访问（建议 chmod 600）'
     secret="$(cat "$key_file")"
   elif secret="$(extract_key_from_old_file "$EDGE_CONF")"; then
-    log '复用现有 /etc/n2n/edge.conf 中的密钥'
+    log '复用现有 /etc/n2n/edge.conf 中的密钥' >&2
   elif secret="$(extract_key_from_old_file "$SUP_CONF")"; then
-    log '检测到旧 Supervisor 配置中的密钥，迁移到 root-only 配置'
+    log '检测到旧 Supervisor 配置中的密钥，迁移到 root-only 配置' >&2
   else
     [[ -r /dev/tty ]] || fail '没有可交互终端输入密钥；请预置 root-only 密钥文件并使用 --key-file'
     printf '首次安装请输入 n2n 共享密钥（输入不显示）：' > /dev/tty
@@ -282,23 +321,42 @@ EOF
 }
 service_run() {
   systemctl enable --now supervisor >/dev/null
+  local existed=0 state='' i
+  # supervisorctl update may automatically start new programs and leave them STARTING.
+  if supervisorctl status n2n-edge >/dev/null 2>&1; then existed=1; fi
   supervisorctl reread
   supervisorctl update
-  # Restart is needed after an in-place edit of edge.conf (Supervisor command unchanged).
-  if supervisorctl status n2n-edge 2>/dev/null | grep -q RUNNING; then
-    supervisorctl restart n2n-edge
+  state="$(supervisorctl status n2n-edge 2>&1 || true)"
+  if (( existed )); then
+    # edge.conf changes are not visible to supervisord, so force a fresh process.
+    # Stop first even if the program was STARTING; avoid restart/start races.
+    if grep -Eq '[[:space:]](RUNNING|STARTING)[[:space:]]' <<<"$state"; then
+      supervisorctl stop n2n-edge >/dev/null || warn '停止旧 edge 进程失败，尝试继续启动'
+    fi
+    supervisorctl start n2n-edge >/dev/null || return 1
   else
-    supervisorctl start n2n-edge
+    # First install: update with autostart=true often starts the new program.
+    # Never issue start while it is already STARTING.
+    if ! grep -Eq '[[:space:]](RUNNING|STARTING)[[:space:]]' <<<"$state"; then
+      supervisorctl start n2n-edge >/dev/null || return 1
+    fi
   fi
-  local i out
-  for i in {1..12}; do
-    out="$(supervisorctl status n2n-edge 2>&1 || true)"
-    if grep -q 'RUNNING' <<<"$out"; then log "Supervisor: $out"; return 0; fi
+  for i in {1..20}; do
+    state="$(supervisorctl status n2n-edge 2>&1 || true)"
+    if grep -Eq '[[:space:]]RUNNING[[:space:]]' <<<"$state"; then
+      log "Supervisor: $state"
+      return 0
+    fi
+    if grep -Eq '[[:space:]]FATAL[[:space:]]' <<<"$state"; then
+      warn "进程进入 FATAL：$state"
+      return 1
+    fi
     sleep 1
   done
-  warn "进程未进入 RUNNING：${out:-unknown}"
+  warn "进程未进入 RUNNING：${state:-unknown}"
   return 1
 }
+
 # Backup/restore config if service cannot start, without destroying previous state.
 apply_config() {
   local id="$1" secret="$2" backup_dir cfg_tmp sup_tmp
