@@ -28,29 +28,29 @@ fail() { log "ERROR: $*" >&2; exit 1; }
 warn() { log "WARN: $*" >&2; }
 usage() {
   cat <<'EOF'
-�÷���
-  sudo bash rk3576-n2n-setup.sh 082              �״ΰ�װ����±��
-  sudo rk3576-n2n-setup --set-id 083            ���޸ı�ţ�����װ
-  sudo rk3576-n2n-setup --status                �鿴��ǰ״̬
+用法：
+  sudo bash rk3576-n2n-setup.sh 082              首次安装或更新编号
+  sudo rk3576-n2n-setup --set-id 083            仅修改编号，不重装
+  sudo rk3576-n2n-setup --status                查看当前状态
   sudo bash rk3576-n2n-setup.sh 082 --key-file /root/n2n.key
 
-��ű���ǡ���� 3 λ���֣����� 001��082��999��������ǰ���㡣
-�״ΰ�װʱ�����δ����ԭ����Կ�����ӱ����ն���������һ�Ρ�
-������ȫ�޽�����װ�������Ȱ�ȫ����ֻ�� root �ɶ�����Կ�ļ����ټ� --key-file ������
+编号必须恰好是 3 位数字（例如 001、082、999），保留前导零。
+首次安装时，如果未发现原有密钥，将从本机终端隐藏输入一次。
+若需完全无交互安装，请事先安全放置只有 root 可读的密钥文件，再加 --key-file 参数。
 EOF
 }
-require_root() { [[ "${EUID}" -eq 0 ]] || fail '��ʹ�� sudo �� root ִ��'; }
+require_root() { [[ "${EUID}" -eq 0 ]] || fail '请使用 sudo 或 root 执行'; }
 validate_id() {
   local id="${1:-}"
-  [[ "$id" =~ ^[0-9]{3}$ ]] || fail "��� '${id}' ��Ч��ֻ��������λ���֣����� 082��82 �����Զ����㣩"
+  [[ "$id" =~ ^[0-9]{3}$ ]] || fail "编号 '${id}' 无效：只能输入三位数字，例如 082（82 不会自动补零）"
   local identity="${ID_PREFIX}${id}"
   local community="${identity}_${id}"
-  ((${#community} <= 19)) || fail '�������Ƴ��� n2n 3.1.1 ֧�ֵ� 19 �ֽ�'
+  ((${#community} <= 19)) || fail '社区名称超过 n2n 3.1.1 支持的 19 字节'
 }
 validate_key() {
   local secret="$1"
   [[ "$secret" =~ ^[A-Za-z0-9._@%+=:/-]{8,128}$ ]] || \
-     fail '��Կ��ʽ���Ϲ棺�� 8-128 �� ASCII �ַ�����������ĸ�����ּ� . _ @ % + = : / -'
+     fail '密钥格式不合规：需 8-128 个 ASCII 字符，仅允许字母、数字及 . _ @ % + = : / -'
 }
 ensure_log() {
   install -d -m 700 /var/log
@@ -58,19 +58,19 @@ ensure_log() {
   exec > >(tee -a "$LOG_FILE") 2>&1
 }
 acquire_lock() {
-  command -v flock >/dev/null || fail 'flock �����ڣ��޷���֤��ʵ����װ'
+  command -v flock >/dev/null || fail 'flock 不存在，无法保证单实例安装'
   exec 9>/run/lock/rk3576-n2n-setup.lock
-  flock -n 9 || fail '��һ��װ/�޸Ľ�����������'
+  flock -n 9 || fail '另一安装/修改进程正在运行'
 }
 require_platform() {
   local soc="" release="" distro=""
   soc="$(tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null || :)"
   release="$(uname -r)"; distro="$(. /etc/os-release && echo "${ID}:${VERSION_ID}")"
-  [[ "$(uname -m)" == 'aarch64' ]] || fail 'ֻ���� aarch64 �豸����'
-  grep -qx 'rockchip,rk3576' <<<"$soc" || fail '���� RK3576���ܾ��޸��ں�'
-  [[ "$release" == "$KERNEL_REQUIRED" ]] || fail "�ں�Ϊ $release����ǰ�ű�ֻ֧�� $KERNEL_REQUIRED"
-  [[ "$distro" == 'debian:12' ]] || fail "��ǰϵͳ $distro���ű�����֤ Debian 12"
-  log "ƽ̨ͨ����RK3576 / Debian 12 / Kernel ${release}"
+  [[ "$(uname -m)" == 'aarch64' ]] || fail '只能在 aarch64 设备运行'
+  grep -qx 'rockchip,rk3576' <<<"$soc" || fail '不是 RK3576，拒绝修改内核'
+  [[ "$release" == "$KERNEL_REQUIRED" ]] || fail "内核为 $release，当前脚本只支持 $KERNEL_REQUIRED"
+  [[ "$distro" == 'debian:12' ]] || fail "当前系统 $distro，脚本仅验证 Debian 12"
+  log "平台通过：RK3576 / Debian 12 / Kernel ${release}"
 }
 install_packages_if_missing() {
   local packages=(git curl ca-certificates build-essential autoconf automake libtool pkg-config iproute2 kmod supervisor)
@@ -81,11 +81,11 @@ install_packages_if_missing() {
     fi
   done
   if ((${#missing[@]})); then
-    log "��װȱ�ٵ�ϵͳ������${missing[*]}"
+    log "安装缺少的系统依赖：${missing[*]}"
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   else
-    log '����ϵͳ�������Ѱ�װ'
+    log '所需系统软件包已安装'
   fi
 }
 n2n_is_311() {
@@ -93,31 +93,31 @@ n2n_is_311() {
     /usr/sbin/edge -h 2>&1 | grep -q 'n2n v\.3\.1\.1'
 }
 install_n2n() {
-  if n2n_is_311; then log 'n2n 3.1.1 �Ѱ�װ����������'; return 0; fi
+  if n2n_is_311; then log 'n2n 3.1.1 已安装，跳过编译'; return 0; fi
   if [[ -e /usr/sbin/edge ]]; then
-    fail '/usr/sbin/edge �Ѵ��ڣ�������Ԥ�ڵ� 3.1.1�����⸲�ǣ����˹�ȷ��'
+    fail '/usr/sbin/edge 已存在，但不是预期的 3.1.1；避免覆盖，需人工确认'
   fi
   mkdir -p /data
   if [[ ! -d "$N2N_SRC/.git" ]]; then
-    [[ ! -e "$N2N_SRC" ]] || fail "Դ��Ŀ¼ $N2N_SRC �Ѵ��ڵ����� Git �ֿ�"
-    log '���� n2n 3.1.1 Դ��'
+    [[ ! -e "$N2N_SRC" ]] || fail "源码目录 $N2N_SRC 已存在但不是 Git 仓库"
+    log '下载 n2n 3.1.1 源码'
     git clone --branch "$N2N_VERSION" --depth 1 https://github.com/ntop/n2n.git "$N2N_SRC"
   fi
   # Avoid executing a pre-existing, user-writable source tree as root.
   [[ "$(stat -c '%u' "$N2N_SRC")" == 0 ]] || \
-    fail "ԴĿ¼ $N2N_SRC �� root ���У����ܰ�ȫ����Ϊ root ���룬���˹���������׼��"
+    fail "源目录 $N2N_SRC 非 root 所有，不能安全地作为 root 编译，请人工检查后重新准备"
   local src_mode
   src_mode="$(stat -c '%a' "$N2N_SRC")"
   (( (8#$src_mode & 022) == 0 )) || \
-    fail "ԴĿ¼ $N2N_SRC �ɱ��� root д�룬�ܾ��� root ����"
+    fail "源目录 $N2N_SRC 可被非 root 写入，拒绝以 root 编译"
   local commit
   commit="$(git -C "$N2N_SRC" rev-parse HEAD)"
-  [[ "$commit" == "$N2N_COMMIT" ]] || fail "n2n Դ���ύ��ƥ�䣬�õ� $commit"
-  log '���� n2n��-j4���ʺ� 2GB RAM��'
+  [[ "$commit" == "$N2N_COMMIT" ]] || fail "n2n 源码提交不匹配，得到 $commit"
+  log '编译 n2n（-j4，适合 2GB RAM）'
   ( cd "$N2N_SRC" && ./autogen.sh && ./configure && make -j4 && make install )
   ldconfig
-  n2n_is_311 || fail 'n2n ��װ��汾��֤ʧ��'
-  log 'n2n 3.1.1 ��װ�ɹ�'
+  n2n_is_311 || fail 'n2n 安装后版本验证失败'
+  log 'n2n 3.1.1 安装成功'
 }
 
 tap_probe() {
@@ -137,72 +137,72 @@ ensure_tun() {
   if tap_probe; then
     # A manually insmod'ed driver works now but may disappear on reboot.
     if [[ -f /proc/config.gz ]] && zcat /proc/config.gz | grep -qx 'CONFIG_TUN=y'; then
-      log 'TUN/TAP �������ںˣ�����ģ�鹹��'
+      log 'TUN/TAP 已内置内核，跳过模块构建'
       return 0
     fi
     if modinfo -n tun >/dev/null 2>&1; then
-      log 'TUN/TAP ������ tun.ko ���� modprobe �ҵ�������ģ�鹹��'
+      log 'TUN/TAP 可用且 tun.ko 可由 modprobe 找到，跳过模块构建'
       return 0
     fi
     if [[ -s "$TUN_SRC/tun.ko" ]]; then
-      log 'TUN ����ʱ���أ�����δ���ð�װ����װ���� tun.ko'
+      log 'TUN 已临时加载，但尚未永久安装，补装现有 tun.ko'
       local mod_dir="/lib/modules/$(uname -r)/extra"
       install -d -m 755 "$mod_dir"
       install -m 644 "$TUN_SRC/tun.ko" "$mod_dir/tun.ko"
-      depmod -a || warn 'depmod ���棬���� modprobe'
-      modinfo -n tun >/dev/null || fail '�޷����� tun.ko ģ������'
+      depmod -a || warn 'depmod 警告，请检查 modprobe'
+      modinfo -n tun >/dev/null || fail '无法建立 tun.ko 模块索引'
       return 0
     fi
-    fail 'TUN ����ʱ���أ���ģ���ļ�δ��װ���Ҳ�������������ܱ�֤������ָ�'
+    fail 'TUN 已临时加载，但模块文件未安装且找不到构建产物，不能保证重启后恢复'
   fi
-  log '���Լ������� TUN ģ��'
+  log '尝试加载已有 TUN 模块'
   modprobe tun >/dev/null 2>&1 || true
   ensure_tun_device_node
-  if tap_probe; then log '����ϵͳ���� TUN ģ��ɹ�'; return 0; fi
+  if tap_probe; then log '加载系统现有 TUN 模块成功'; return 0; fi
 
-  log 'ϵͳû�п��õ� TUN/TAP��׼�������뵱ǰ�ں�ƥ��� tun.ko'
-  [[ -d "$KDIR" ]] || fail "ȱʧ $KDIR�����򳧼һ�ȡ��ȷ headers"
-  [[ "$(make -s -C "$KDIR" kernelrelease)" == "$(uname -r)" ]] || fail 'headers release ���ں˲�ƥ��'
+  log '系统没有可用的 TUN/TAP，准备构建与当前内核匹配的 tun.ko'
+  [[ -d "$KDIR" ]] || fail "缺失 $KDIR，请向厂家获取正确 headers"
+  [[ "$(make -s -C "$KDIR" kernelrelease)" == "$(uname -r)" ]] || fail 'headers release 与内核不匹配'
   for f in .config Module.symvers include/generated/autoconf.h include/generated/utsrelease.h; do
-    [[ -s "$KDIR/$f" ]] || fail "headers ȱ�� $f"
+    [[ -s "$KDIR/$f" ]] || fail "headers 缺少 $f"
   done
   if [[ -f /proc/config.gz ]]; then
-    zcat /proc/config.gz | grep -qx 'CONFIG_MODULES=y' || fail '�ں˲�֧�ֶ�̬ģ��'
+    zcat /proc/config.gz | grep -qx 'CONFIG_MODULES=y' || fail '内核不支持动态模块'
   else
-    fail 'ȱ�� /proc/config.gz���޷���ȫȷ���ں�ѡ��'
+    fail '缺少 /proc/config.gz，无法安全确认内核选项'
   fi
   grep -qx '# CONFIG_TUN is not set' "$KDIR/.config" || \
-    fail 'headers �� CONFIG_TUN ������֤������ͬ���ܾ�ǿ�Ʊ���'
+    fail 'headers 的 CONFIG_TUN 与已验证方案不同，拒绝强制编译'
   if grep -qx 'CONFIG_MODVERSIONS=y' "$KDIR/.config"; then
-    fail 'headers ������ CONFIG_MODVERSIONS�������ڱ�����֤����ģ�鹹��·��'
+    fail 'headers 开启了 CONFIG_MODVERSIONS，不属于本机验证过的模块构建路径'
   fi
   mkdir -p "$TUN_SRC"
   if [[ ! -s "$TUN_SRC/tun.c" ]]; then
-    log '���� Linux stable v6.1.99 tun.c���̶������ύ��'
+    log '下载 Linux stable v6.1.99 tun.c（固定上游提交）'
     curl -fL --retry 3 --proto '=https' --tlsv1.2 \
       "$TUN_URL" -o "$TUN_SRC/tun.c.tmp"
     mv "$TUN_SRC/tun.c.tmp" "$TUN_SRC/tun.c"
   fi
-  grep -q 'Universal TUN/TAP device driver' "$TUN_SRC/tun.c" || fail 'tun.c �ļ��쳣'
+  grep -q 'Universal TUN/TAP device driver' "$TUN_SRC/tun.c" || fail 'tun.c 文件异常'
   cat > "$TUN_SRC/Makefile" <<'EOF'
 obj-m += tun.o
 ccflags-y += -DCONFIG_TUN_MODULE
 EOF
-  log '���� tun.ko'
+  log '编译 tun.ko'
   make -C "$KDIR" M="$TUN_SRC" clean
   make -C "$KDIR" M="$TUN_SRC" modules
   [[ "$(modinfo -F vermagic "$TUN_SRC/tun.ko" | awk '{print $1}')" == "$(uname -r)" ]] || \
-    fail 'tun.ko vermagic �������ں˲�ƥ��'
+    fail 'tun.ko vermagic 与运行内核不匹配'
   local mod_dir="/lib/modules/$(uname -r)/extra"
   install -d -m 755 "$mod_dir"
   install -m 644 "$TUN_SRC/tun.ko" "$mod_dir/tun.ko"
-  depmod -a || warn 'depmod ���־��棬������֤����'
+  depmod -a || warn 'depmod 出现警告，继续验证加载'
   if ! modprobe tun; then
-    fail 'modprobe tun ʧ�ܣ���鿴 dmesg�����ᴴ�� Supervisor ����'
+    fail 'modprobe tun 失败，请查看 dmesg；不会创建 Supervisor 服务'
   fi
   ensure_tun_device_node
-  tap_probe || fail 'TUN ���غ� TAP ��������ʧ��'
-  log 'TUN/TAP ���롢���غ� TAP ʵ��ɹ�'
+  tap_probe || fail 'TUN 加载后 TAP 创建测试失败'
+  log 'TUN/TAP 编译、加载和 TAP 实测成功'
 }
 install_tun_autoload() {
   install -d -m 755 /etc/modules-load.d
@@ -225,20 +225,20 @@ extract_key_from_old_file() {
 get_secret() {
   local key_file="${1:-}" secret=''
   if [[ -n "$key_file" ]]; then
-    [[ -f "$key_file" && ! -L "$key_file" ]] || fail '��Կ�ļ������ڻ��Ƿ�������'
-    [[ "$(stat -c '%u' "$key_file")" == 0 ]] || fail '��Կ�ļ������ root ����'
+    [[ -f "$key_file" && ! -L "$key_file" ]] || fail '密钥文件不存在或是符号链接'
+    [[ "$(stat -c '%u' "$key_file")" == 0 ]] || fail '密钥文件必须归 root 所有'
     local perms
     perms="$(stat -c '%a' "$key_file")"
-    (( (8#$perms & 077) == 0 )) || fail '��Կ�ļ������ֹ��/�����û����ʣ����� chmod 600��'
+    (( (8#$perms & 077) == 0 )) || fail '密钥文件必须禁止组/其他用户访问（建议 chmod 600）'
     secret="$(cat "$key_file")"
   elif secret="$(extract_key_from_old_file "$EDGE_CONF")"; then
-    log '�������� /etc/n2n/edge.conf �е���Կ'
+    log '复用现有 /etc/n2n/edge.conf 中的密钥'
   elif secret="$(extract_key_from_old_file "$SUP_CONF")"; then
-    log '��⵽�� Supervisor �����е���Կ��Ǩ�Ƶ� root-only ����'
+    log '检测到旧 Supervisor 配置中的密钥，迁移到 root-only 配置'
   else
-    [[ -r /dev/tty ]] || fail 'û�пɽ����ն�������Կ����Ԥ�� root-only ��Կ�ļ���ʹ�� --key-file'
-    printf '�״ΰ�װ������ n2n ������Կ�����벻��ʾ����' > /dev/tty
-    IFS= read -r -s secret < /dev/tty || fail '��ȡ������Կʧ��'
+    [[ -r /dev/tty ]] || fail '没有可交互终端输入密钥；请预置 root-only 密钥文件并使用 --key-file'
+    printf '首次安装请输入 n2n 共享密钥（输入不显示）：' > /dev/tty
+    IFS= read -r -s secret < /dev/tty || fail '读取共享密钥失败'
     printf '\n' > /dev/tty
   fi
   validate_key "$secret"
@@ -296,7 +296,7 @@ service_run() {
     if grep -q 'RUNNING' <<<"$out"; then log "Supervisor: $out"; return 0; fi
     sleep 1
   done
-  warn "����δ���� RUNNING��${out:-unknown}"
+  warn "进程未进入 RUNNING：${out:-unknown}"
   return 1
 }
 # Backup/restore config if service cannot start, without destroying previous state.
@@ -314,7 +314,7 @@ apply_config() {
   mv -f "$cfg_tmp" "$EDGE_CONF"
   mv -f "$sup_tmp" "$SUP_CONF"
   if ! service_run; then
-    warn '������֤ʧ�ܣ����ڻع�ԭ����'
+    warn '启动验证失败，正在回滚原配置'
     if [[ -f "$backup_dir/edge.conf" ]]; then
       cp -p "$backup_dir/edge.conf" "$EDGE_CONF"
     else
@@ -330,11 +330,11 @@ apply_config() {
     if [[ -f "$backup_dir/n2n-edge.conf" ]]; then
       supervisorctl restart n2n-edge || true
     fi
-    fail "edge ��������ʧ�ܣ��������Ѿ����ָܻ�������Ŀ¼��${backup_dir}���鿴 /var/log/n2n-edge.log"
+    fail "edge 进程启动失败，旧配置已尽可能恢复。备份目录：${backup_dir}；查看 /var/log/n2n-edge.log"
   fi
-  log "�����ñ�ţ�$id��Identity��${ID_PREFIX}${id}���������ƣ�${ID_PREFIX}${id}_${id}"
-  log 'Supernode ע����˵�����ͨ����Ҫ������֤��RUNNING �����������ɹ�'
-  log "�����ñ��ݣ�$backup_dir"
+  log "已设置编号：$id；Identity：${ID_PREFIX}${id}；社区名称：${ID_PREFIX}${id}_${id}"
+  log 'Supernode 注册与端到端连通性需要额外验证，RUNNING 不等于联网成功'
+  log "旧配置备份：$backup_dir"
 }
 show_status() {
   local community='not-configured' identity='not-configured' id='not-configured' parse_status='unknown'
@@ -367,12 +367,12 @@ show_status() {
   supervisorctl status n2n-edge 2>/dev/null || true
   printf 'Overlay links:\n'
   ip -br link 2>/dev/null | grep -E '^edge[0-9]*[[:space:]]' || true
-  echo '(���������� n2n ��Կ)'
+  echo '(该命令不会输出 n2n 密钥)'
 }
 install_self() {
   local script_path
   script_path="$(readlink -f "${BASH_SOURCE[0]}")"
-  [[ -f "$script_path" ]] || { warn '��ǰʹ�ñ�׼�����������޷����汾��ά���ű�'; return; }
+  [[ -f "$script_path" ]] || { warn '当前使用标准输入启动，无法保存本地维护脚本'; return; }
   [[ "$script_path" == "$SELF_INSTALL" ]] && return
   install -m 755 "$script_path" "$SELF_INSTALL"
 }
@@ -380,11 +380,11 @@ main() {
   local mode='install' id='' key_file=''
   case "${1:-}" in
     -h|--help|'') usage; [[ -n "${1:-}" ]] && exit 0 || exit 2 ;;
-    --status) [[ $# -eq 1 ]] || fail '�������'; show_status; exit 0 ;;
-    --set-id) mode='set-id'; [[ $# -eq 2 ]] || fail '�÷���--set-id 083'; id="$2" ;;
+    --status) [[ $# -eq 1 ]] || fail '多余参数'; show_status; exit 0 ;;
+    --set-id) mode='set-id'; [[ $# -eq 2 ]] || fail '用法：--set-id 083'; id="$2" ;;
     *) id="$1"; shift
        if [[ $# -gt 0 ]]; then
-          [[ $# -eq 2 && "$1" == '--key-file' ]] || fail '��֧�ֿ�ѡ�� --key-file /root/path'
+          [[ $# -eq 2 && "$1" == '--key-file' ]] || fail '仅支持可选的 --key-file /root/path'
           key_file="$2"
        fi ;;
   esac
@@ -392,17 +392,17 @@ main() {
   require_root
   acquire_lock
   ensure_log
-  log "rk3576-n2n-setup $VERSION������=$mode�����=$id"
+  log "rk3576-n2n-setup $VERSION：操作=$mode；编号=$id"
   if [[ "$mode" == 'set-id' ]]; then
-    [[ -f "$EDGE_CONF" ]] || fail '��δ��ɽű����������У�sudo bash �ű�.sh 082'
-    grep -q '^# managed-by: rk3576-n2n-setup' "$EDGE_CONF" || fail '���� edge.conf ���Ǳ��ű����ɵģ�������ģ���������������װǨ��'
+    [[ -f "$EDGE_CONF" ]] || fail '尚未完成脚本部署，先运行：sudo bash 脚本.sh 082'
+    grep -q '^# managed-by: rk3576-n2n-setup' "$EDGE_CONF" || fail '现有 edge.conf 不是本脚本生成的，避免误改；请先运行完整安装迁移'
     local secret
-    secret="$(extract_key_from_old_file "$EDGE_CONF")" || fail '��������δ�ҵ���Կ'
+    secret="$(extract_key_from_old_file "$EDGE_CONF")" || fail '已有配置未找到密钥'
     validate_key "$secret"
     apply_config "$id" "$secret"
     unset secret
     install_self
-    log '����޸���ɣ�û�����±��� n2n / tun���Ѹ��±���ά���ű�'
+    log '编号修改完成：没有重新编译 n2n / tun；已更新本地维护脚本'
     exit 0
   fi
   require_platform
@@ -415,7 +415,7 @@ main() {
   apply_config "$id" "$secret"
   unset secret
   install_self
-  log "������ɡ��´θı�ţ�sudo $SELF_INSTALL --set-id 083"
-  log "״̬�鿴��sudo $SELF_INSTALL --status"
+  log "部署完成。下次改编号：sudo $SELF_INSTALL --set-id 083"
+  log "状态查看：sudo $SELF_INSTALL --status"
 }
 main "$@"
