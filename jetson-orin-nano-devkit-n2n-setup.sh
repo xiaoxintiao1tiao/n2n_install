@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 N2N_VERSION="3.1.1"
 N2N_COMMIT="ce998b986c633bc563835d8a3cc8f72a017b53d1"
 ID_PREFIX="1712350000"
@@ -24,7 +24,7 @@ warn() { log "WARN: $*" >&2; }
 
 usage() {
   cat <<'EOF'
-NVIDIA Orin Nano Developer Kit n2n 安装脚本 v1.0.0
+NVIDIA Orin Nano Developer Kit n2n 安装脚本 v1.0.1
 
 首次安装：
   sudo bash jetson-orin-nano-devkit-n2n-setup.sh 083
@@ -239,7 +239,7 @@ ensure_tun_device_node() {
 install_tun_persistence() {
   install -d -m 755 /etc/tmpfiles.d
   cat >/etc/tmpfiles.d/n2n-tun.conf <<'EOF'
-c /dev/net/tun 0666 root root -
+c /dev/net/tun 0666 root root - 10:200
 EOF
   chmod 644 /etc/tmpfiles.d/n2n-tun.conf
   command -v systemd-tmpfiles >/dev/null 2>&1 || fail 'systemd-tmpfiles 不存在，无法保证 /dev/net/tun 开机重建'
